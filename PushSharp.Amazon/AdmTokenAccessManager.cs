@@ -5,22 +5,22 @@ using PushSharp.Core;
 using System.Collections.Generic;
 using Newtonsoft.Json.Linq;
 
-namespace PushSharp.Windows
+namespace PushSharp.Amazon
 {
-    public class WnsAccessTokenManager
+    public class AdmAccessTokenManager
     {
         Task renewAccessTokenTask = null;
         string accessToken = null;
         PushyHttpClient http;
         private DateTime expire;
 
-        public WnsAccessTokenManager(WnsConfiguration configuration)
+        public AdmAccessTokenManager(AdmConfiguration configuration)
         {
             http = new PushyHttpClient();
             Configuration = configuration;
         }
 
-        public WnsConfiguration Configuration { get; private set; }
+        public AdmConfiguration Configuration { get; private set; }
 
         public async Task<string> GetAccessToken()
         {
@@ -52,12 +52,12 @@ namespace PushSharp.Windows
         {
             var p = new Dictionary<string, string> {
                 { "grant_type", "client_credentials" },
-                { "client_id", Configuration.PackageSecurityIdentifier },
-                { "client_secret", Configuration.ClientSecret },
-                { "scope", "notify.windows.com" }
+                { "scope", "messaging:push" },
+                { "client_id", Configuration.ClientId },
+                { "client_secret", Configuration.ClientSecret }
             };
 
-            var result = await http.PostAsync(Configuration.WnsAuthUrl, new FormUrlEncodedContent(p));
+            var result = await http.PostAsync(Configuration.AdmAuthUrl, new FormUrlEncodedContent(p));
 
             var data = await result.Content.ReadAsStringAsync();
 
@@ -71,11 +71,12 @@ namespace PushSharp.Windows
                 token = json.Value<string>("access_token");
                 tokenType = json.Value<string>("token_type");
                 expireTime = json.Value<int>("expires_in");
-
             }
             catch
             {
             }
+
+
 
             if (!string.IsNullOrEmpty(token) && !string.IsNullOrEmpty(tokenType))
             {
@@ -86,7 +87,7 @@ namespace PushSharp.Windows
             {
                 accessToken = null;
                 expire = DateTime.UtcNow.AddYears(-1);
-                throw new UnauthorizedAccessException("Could not retrieve access token for the supplied Package Security Identifier (SID) and client secret");
+                throw new UnauthorizedAccessException("Could not retrieve access token for the supplied client_id and client secret");
             }
         }
     }

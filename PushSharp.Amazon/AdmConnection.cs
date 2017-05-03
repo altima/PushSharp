@@ -14,8 +14,11 @@ namespace PushSharp.Amazon
 {
     public class AdmServiceConnectionFactory : IServiceConnectionFactory<AdmNotification>
     {
-        public AdmServiceConnectionFactory (AdmConfiguration configuration)
+        private AdmAccessTokenManager admAccessTokenManager;
+
+        public AdmServiceConnectionFactory(AdmConfiguration configuration)
         {
+            admAccessTokenManager = new AdmAccessTokenManager(configuration);
             Configuration = configuration;
         }
 
@@ -23,132 +26,93 @@ namespace PushSharp.Amazon
 
         public IServiceConnection<AdmNotification> Create()
         {
-            return new AdmServiceConnection (Configuration);
+            return new AdmServiceConnection(Configuration, admAccessTokenManager);
         }
     }
 
     public class AdmServiceBroker : ServiceBroker<AdmNotification>
     {
-        public AdmServiceBroker (AdmConfiguration configuration) : base (new AdmServiceConnectionFactory (configuration))
+        public AdmServiceBroker(AdmConfiguration configuration) : base(new AdmServiceConnectionFactory(configuration))
         {
         }
     }
 
     public class AdmServiceConnection : IServiceConnection<AdmNotification>
     {
-        public AdmServiceConnection (AdmConfiguration configuration)
+        public AdmServiceConnection(AdmConfiguration configuration, AdmAccessTokenManager accessTokenManager)
         {
+            AccessTokenManager = accessTokenManager;
             Configuration = configuration;
 
-            Expires = DateTime.UtcNow.AddYears(-1);
-
-            http.DefaultRequestHeaders.Add ("X-Amzn-Type-Version", "com.amazon.device.messaging.ADMMessage@1.0");
-            http.DefaultRequestHeaders.Add ("X-Amzn-Accept-Type", "com.amazon.device.messaging.ADMSendResult@1.0");
-            http.DefaultRequestHeaders.Add ("Accept", "application/json");
-            http.DefaultRequestHeaders.ConnectionClose = true;
-
-            http.DefaultRequestHeaders.Remove("connection");
+            
         }
 
         public AdmConfiguration Configuration { get; private set; }
+        public AdmAccessTokenManager AccessTokenManager { get; private set; }
 
-        public DateTime Expires { get; set; }
-        public DateTime LastRequest { get; private set; }
-        public string LastAmazonRequestId { get; private set; }
-        public string AccessToken { get; private set; }
-
-        readonly HttpClient http = new HttpClient ();
-
-        public async Task Send (AdmNotification notification)
+        public async Task Send(AdmNotification notification)
         {
-            try
+            var accessToken = await AccessTokenManager.GetAccessToken();
+
+            var http = new PushyHttpClient();
+
+            http.DefaultRequestHeaders.ExpectContinue = false;
+
+            http.DefaultRequestHeaders.Add("X-Amzn-Type-Version", "com.amazon.device.messaging.ADMMessage@1.0");
+            http.DefaultRequestHeaders.Add("X-Amzn-Accept-Type", "com.amazon.device.messaging.ADMSendResult@1.0");
+            http.DefaultRequestHeaders.Add("Accept", "application/json");
+            //http.DefaultRequestHeaders.ConnectionClose = true;
+            //http.DefaultRequestHeaders.Remove("connection");
+
+            if (!http.DefaultRequestHeaders.Contains("Authorization")) //prevent double values
+                http.DefaultRequestHeaders.TryAddWithoutValidation("Authorization", "Bearer " + accessToken);
+
+            var sc = new StringContent(notification.ToJson());
+            sc.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+
+            var response = await http.PostAsync(string.Format(Configuration.AdmSendUrl, notification.RegistrationId), sc);
+
+            // We're done here if it was a success
+            if (response.IsSuccessStatusCode)
             {
-                if (string.IsNullOrEmpty(AccessToken) || Expires <= DateTime.UtcNow) {
-                    await UpdateAccessToken ();
-                    http.DefaultRequestHeaders.TryAddWithoutValidation("Authorization", "Bearer " + AccessToken);
-                    //http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", AccessToken);
-                }
+                return;
+            }
 
-                var sc = new StringContent(notification.ToJson ());
-                sc.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            var data = await response.Content.ReadAsStringAsync();
 
-                var response = await http.PostAsync (string.Format(Configuration.AdmSendUrl, notification.RegistrationId), sc);
+            var json = JObject.Parse(data);
 
-                // We're done here if it was a success
-                if (response.IsSuccessStatusCode) {                    
-                    return;
-                }
+            var reason = json["reason"].ToString();
 
-                var data = await response.Content.ReadAsStringAsync();
+            var regId = notification.RegistrationId;
 
-                var json = JObject.Parse (data);
+            if (json["registrationID"] != null)
+                regId = json["registrationID"].ToString();
 
-                var reason = json ["reason"].ToString ();
-
-                var regId = notification.RegistrationId;
-
-                if (json["registrationID"] != null)
-                    regId = json["registrationID"].ToString();
-
-                switch (response.StatusCode)
-                {
+            switch (response.StatusCode)
+            {
                 case HttpStatusCode.BadGateway: //400
                 case HttpStatusCode.BadRequest: //
-                    if ("InvalidRegistrationId".Equals (reason, StringComparison.InvariantCultureIgnoreCase)) {
-                        throw new DeviceSubscriptionExpiredException (notification) {
+                    if ("InvalidRegistrationId".Equals(reason, StringComparison.InvariantCultureIgnoreCase))
+                    {
+                        throw new DeviceSubscriptionExpiredException(notification)
+                        {
                             OldSubscriptionId = regId,
                             ExpiredAt = DateTime.UtcNow
                         };
                     }
-                    throw new NotificationException ("Notification Failed: " + reason, notification);
+                    throw new NotificationException("Notification Failed: " + reason, notification);
                 case HttpStatusCode.Unauthorized: //401
-                    //Access token expired
-                    AccessToken = null;
-                    throw new UnauthorizedAccessException ("Access token failed authorization");
+                                                  //Access token expired
+                    AccessTokenManager.InvalidateAccessToken(accessToken);
+                    throw new UnauthorizedAccessException("Access token failed authorization");
                 case HttpStatusCode.Forbidden: //403
-                    throw new AdmRateLimitExceededException (reason, notification);
+                    throw new AdmRateLimitExceededException(reason, notification);
                 case HttpStatusCode.RequestEntityTooLarge: //413
-                    throw new AdmMessageTooLargeException (notification);
+                    throw new AdmMessageTooLargeException(notification);
                 default:
-                    throw new NotificationException ("Unknown ADM Failure", notification);
-                }
-            }
-            catch (Exception ex)
-            {
-                throw new NotificationException ("Unknown ADM Failure", notification, ex);
+                    throw new NotificationException("Unknown ADM Failure", notification);
             }
         }
-
-
-        async Task UpdateAccessToken()
-        {
-            var http = new HttpClient ();
-
-            var param = new Dictionary<string, string> ();
-            param.Add ("grant_type", "client_credentials");
-            param.Add ("scope", "messaging:push");
-            param.Add ("client_id", Configuration.ClientId);
-            param.Add ("client_secret", Configuration.ClientSecret);
-
-
-            var result = await http.PostAsync (Configuration.AdmAuthUrl, new FormUrlEncodedContent (param));
-            var data = await result.Content.ReadAsStringAsync();
-
-            var json = JObject.Parse (data);
-
-            AccessToken = json ["access_token"].ToString ();
-
-            JToken expiresJson = new JValue(3540);
-            if (json.TryGetValue("expires_in", out expiresJson))
-                Expires = DateTime.UtcNow.AddSeconds(expiresJson.ToObject<int>() - 60);
-            else
-                Expires = DateTime.UtcNow.AddSeconds(3540);
-
-            if (result.Headers.Contains ("X-Amzn-RequestId"))
-                this.LastAmazonRequestId = string.Join("; ", result.Headers.GetValues("X-Amzn-RequestId"));
-
-            LastRequest = DateTime.UtcNow;
-        }
-
     }
 }

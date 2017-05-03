@@ -59,7 +59,7 @@ namespace PushSharp.Windows
             //
                         
             // Not sure how to do this in httpclient
-            var http = new HttpClient ();
+            var http = new PushyHttpClient();
             http.DefaultRequestHeaders.ExpectContinue = false; //Disable expect-100 to improve latency
 
             http.DefaultRequestHeaders.TryAddWithoutValidation ("X-WNS-Type", string.Format ("wns/{0}", notification.Type.ToString().ToLower ()));

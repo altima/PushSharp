@@ -38,7 +38,7 @@ namespace PushSharp.Google
         public GcmServiceConnection (GcmConfiguration configuration)
         {
             Configuration = configuration;
-            http = new HttpClient ();
+            http = new PushyHttpClient();
 
             http.DefaultRequestHeaders.UserAgent.Clear ();
             http.DefaultRequestHeaders.UserAgent.Add (new ProductInfoHeaderValue ("PushSharp", "3.0"));
@@ -47,7 +47,7 @@ namespace PushSharp.Google
 
         public GcmConfiguration Configuration { get; private set; }
 
-        readonly HttpClient http;
+        readonly PushyHttpClient http;
 
         public async Task Send (GcmNotification notification)
         {
