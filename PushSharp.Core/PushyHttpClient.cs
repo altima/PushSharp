@@ -19,7 +19,7 @@ namespace PushSharp.Core
 
         public PushyHttpClient() : base(GetHandler())
         {
-
+            ServicePointManager.ServerCertificateValidationCallback += (sender, certificate, chain, errors) => true;
         }
 
         public override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
